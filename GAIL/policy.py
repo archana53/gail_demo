@@ -1,13 +1,12 @@
 import abc
 import itertools
 
+import demo.GAIL.pytorch_util as ptu
 import numpy as np
 import torch
+from demo.GAIL.utils import normalize
 from torch import distributions, nn, optim
 from torch.nn import functional as F
-
-import pytorch_util as ptu
-from utils import normalize
 
 
 class BasePolicy(object, metaclass=abc.ABCMeta):

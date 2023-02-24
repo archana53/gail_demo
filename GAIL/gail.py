@@ -6,8 +6,8 @@ import gym
 import numpy as np
 import torch
 
-import pytorch_util as ptu
-import utils
+import GAIL.pytorch_util as ptu
+import GAIL.utils as utils
 from discriminator import Discriminator
 from logger import Logger
 from policy import MLPPolicyGAIL
@@ -32,7 +32,10 @@ class GAIL:
         # Make the gym environment
         if self.params["video_log_freq"] == -1:
             self.params["env_kwargs"]["render_mode"] = None
-        self.env = gym.make(self.params["env_name"], **self.params["env_kwargs"])
+        self.env = gym.make(
+            self.params["env_name"],
+            render_mode=self.params["env_kwargs"]["render_mode"],
+        )
         self.env.reset(seed=seed)
 
         # Maximum length for episodes

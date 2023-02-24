@@ -1,8 +1,8 @@
 import os
 import time
 
-from gail import GAIL
-from utils import MJ_ENV_KWARGS, MJ_ENV_NAMES
+from GAIL.gail import GAIL
+from GAIL.utils import MJ_ENV_KWARGS, MJ_ENV_NAMES
 
 
 class GAIL_Trainer(object):
@@ -77,7 +77,7 @@ def main():
 
     parser.add_argument("--video_log_freq", type=int, default=5)
     parser.add_argument("--scalar_log_freq", type=int, default=1)
-    parser.add_argument("--no_gpu", "-ngpu", action="store_true")
+    parser.add_argument("--no_gpu", "-ngpu", action="store_true", default=True)
     parser.add_argument("--which_gpu", type=int, default=0)
     parser.add_argument("--max_replay_buffer_size", type=int, default=1000000)
     parser.add_argument("--save_params", action="store_true")
@@ -102,7 +102,6 @@ def main():
     params["logdir"] = logdir
     if not (os.path.exists(logdir)):
         os.makedirs(logdir)
-
     ###################
     ### RUN TRAINING
     ###################

@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-import pytorch_util as ptu
+import GAIL.pytorch_util as ptu
 
 MJ_ENV_NAMES = ["Ant-v4", "Walker2d-v4", "HalfCheetah-v4", "Hopper-v4"]
 MJ_ENV_KWARGS = {name: {"render_mode": "rgb_array"} for name in MJ_ENV_NAMES}
