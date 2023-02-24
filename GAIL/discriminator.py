@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 from torch import nn, optim
-from demo.GAIL.pytorch_util import *
+
+from GAIL.pytorch_util import *
 
 
 class Discriminator(nn.Module):

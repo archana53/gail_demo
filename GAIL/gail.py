@@ -8,9 +8,9 @@ import torch
 
 import GAIL.pytorch_util as ptu
 import GAIL.utils as utils
-from discriminator import Discriminator
-from logger import Logger
-from policy import MLPPolicyGAIL
+from GAIL.discriminator import Discriminator
+from GAIL.logger import Logger
+from GAIL.policy import MLPPolicyGAIL
 
 
 class GAIL:
