@@ -44,19 +44,20 @@ def main():
         "--expert_policy_file", "-epf", type=str, required=False
     )  # relative to where you're running this script from
     parser.add_argument(
-        "--expert_data", "-ed", type=str, required=True
+        "--expert_data",
+        "-ed",
+        type=str,
+        default="gail_demo/expert/expert_data_HalfCheetah-v4.pkl",
     )  # relative to where you're running this script from
     parser.add_argument(
         "--env_name",
         "-env",
         type=str,
         help=f'choices: {", ".join(MJ_ENV_NAMES)}',
-        required=True,
+        default="HalfCheetah-v4",
     )
-    parser.add_argument(
-        "--exp_name", "-exp", type=str, default="pick an experiment name", required=True
-    )
-    parser.add_argument("--ep_len", type=int)
+    parser.add_argument("--exp_name", "-exp", type=str, default="gail_testing_h")
+    parser.add_argument("--ep_len", type=int, default=150)
 
     parser.add_argument("--n_iter", "-n", type=int, default=100)
 
