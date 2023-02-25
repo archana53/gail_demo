@@ -1,12 +1,13 @@
 import abc
 import itertools
 
-import demo.GAIL.pytorch_util as ptu
 import numpy as np
 import torch
-from demo.GAIL.utils import normalize
 from torch import distributions, nn, optim
 from torch.nn import functional as F
+
+import GAIL.pytorch_util as ptu
+from GAIL.utils import normalize
 
 
 class BasePolicy(object, metaclass=abc.ABCMeta):
@@ -31,7 +32,7 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         discrete=False,
         learning_rate=1e-4,
         training=True,
-        nn_baseline=False,
+        nn_baseline=True,
         **kwargs
     ):
         super().__init__(**kwargs)

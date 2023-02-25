@@ -8,9 +8,10 @@ import torch
 
 import GAIL.pytorch_util as ptu
 import GAIL.utils as utils
-from discriminator import Discriminator
-from logger import Logger
-from policy import MLPPolicyGAIL
+from GAIL.agents import GAILAgent
+from GAIL.discriminator import Discriminator
+from GAIL.logger import Logger
+from GAIL.policy import MLPPolicyGAIL
 
 
 class GAIL:
@@ -31,10 +32,12 @@ class GAIL:
 
         # Make the gym environment
         if self.params["video_log_freq"] == -1:
+            self.log_video = 0
             self.params["env_kwargs"]["render_mode"] = None
+        print(self.params["env_kwargs"])
         self.env = gym.make(
             self.params["env_name"],
-            render_mode=self.params["env_kwargs"]["render_mode"],
+            **self.params["env_kwargs"],
         )
         self.env.reset(seed=seed)
 
@@ -44,6 +47,7 @@ class GAIL:
 
         # Is this env continuous, or self.discrete?
         discrete = isinstance(self.env.action_space, gym.spaces.Discrete)
+        self.discrete = discrete
         self.params["agent_params"]["discrete"] = discrete
 
         # Observation and action sizes
@@ -51,6 +55,7 @@ class GAIL:
         ac_dim = self.env.action_space.n if discrete else self.env.action_space.shape[0]
         self.params["agent_params"]["ac_dim"] = ac_dim
         self.params["agent_params"]["ob_dim"] = ob_dim
+        self.params["agent_params"]["gamma"] = self.params["discount"]
 
         # simulation timestep, will be used for video saving
         if "model" in dir(self.env):
@@ -63,40 +68,59 @@ class GAIL:
         # Setup GAIL
         agent_params = self.params["agent_params"]
         self.expert_data = params["expert_data"]
-        self.actor = MLPPolicyGAIL(
-            ac_dim=ac_dim,
-            ob_dim=ob_dim,
-            n_layers=agent_params["n_layers"],
-            size=agent_params["size"],
-            discrete=agent_params["discrete"],
-        )
+        self.agent = GAILAgent(self.env, agent_params)
         with open(self.expert_data, "rb") as f:
             self.expert_paths = pickle.loads(f.read())
-        self.expert_oa_pairs = utils.convert_path_to_obs_actions(self.expert_paths)
+        self.expert_oa_pairs = utils.convert_path_to_obs_actions(
+            self.expert_paths, discrete, ac_dim
+        )
         self.discriminator = Discriminator(
             params=agent_params, expert_pairs=self.expert_oa_pairs
         )
 
-    def run_training_loop(self, n_iters, num_time_steps):
-        for i in range(n_iters):
-            print(f"*** Training Interation {i} ****")
-            paths = utils.sample_trajectories(
+    def run_training_loop(self, n_iters):
+        self.total_envsteps = 0
+        self.start_time = time.time()
+        training_logs = []
+        for itr in range(n_iters):
+            if (
+                itr % self.params["video_log_freq"] == 0
+                and self.params["video_log_freq"] != -1
+            ):
+                self.logvideo = True
+            else:
+                self.logvideo = False
+
+            # decide if metrics should be logged
+            if self.params["scalar_log_freq"] == -1:
+                self.logmetrics = False
+            elif itr % self.params["scalar_log_freq"] == 0:
+                self.logmetrics = True
+            else:
+                self.logmetrics = False
+
+            print(f"*** Training Interation {itr} ****")
+            paths, steps_this_batch = utils.sample_trajectories(
                 self.env,
-                self.actor,
+                self.agent.actor,
                 self.params["batch_size"],
                 self.params["ep_len"],
             )
+            self.total_envsteps += steps_this_batch
             ob, ac, rew, next_ob, terminal = utils.convert_listofrollouts(paths)
-            advantages = self.discriminator.update(ob, ac, rew, next_ob, terminal)
-            training_logs = self.actor.update(
-                paths["observations"], paths["actions"], advantages
+            ob_ac_pairs = utils.convert_path_to_obs_actions(
+                paths, self.discrete, self.params["agent_params"]["ac_dim"]
             )
+            rewards = self.discriminator.update(ob_ac_pairs, rew, next_ob, terminal)
+            train_log = self.agent.train(ob, ac, rewards, next_ob, terminal)
+            training_logs.append(train_log)
 
-            self.perform_logging(i, paths, self.actor, None, training_logs)
+            self.perform_logging(itr, paths, self.agent.actor, None, training_logs)
 
-    def perform_logging(
-        self, itr, paths, eval_policy, train_video_paths, training_logs
-    ):
+    def perform_logging(self, itr, paths, eval_policy, train_video_paths, all_logs):
+        last_log = all_logs[-1]
+        #######################
+
         # collect eval trajectories, for logging
         print("\nCollecting data for eval...")
         eval_paths, eval_envsteps_this_batch = utils.sample_trajectories(
@@ -104,7 +128,7 @@ class GAIL:
         )
 
         # save eval rollouts as videos in tensorboard event file
-        if self.log_video and train_video_paths != None:
+        if self.logvideo and train_video_paths != None:
             print("\nCollecting video rollouts eval")
             eval_video_paths = utils.sample_n_trajectories(
                 self.env, eval_policy, MAX_NVIDEO, MAX_VIDEO_LEN, True
@@ -127,8 +151,10 @@ class GAIL:
                 video_title="eval_rollouts",
             )
 
+        #######################
+
         # save eval metrics
-        if self.log_metrics:
+        if self.logmetrics:
             # returns, for logging
             train_returns = [path["reward"].sum() for path in paths]
             eval_returns = [eval_path["reward"].sum() for eval_path in eval_paths]
@@ -153,9 +179,7 @@ class GAIL:
 
             logs["Train_EnvstepsSoFar"] = self.total_envsteps
             logs["TimeSinceStart"] = time.time() - self.start_time
-            last_log = training_logs[-1]  # Only use the last log for now
             logs.update(last_log)
-            print(training_logs)
 
             if itr == 0:
                 self.initial_return = np.mean(train_returns)

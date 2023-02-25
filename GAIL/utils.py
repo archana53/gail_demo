@@ -3,7 +3,7 @@ import torch
 
 import GAIL.pytorch_util as ptu
 
-MJ_ENV_NAMES = ["Ant-v4", "Walker2d-v4", "HalfCheetah-v4", "Hopper-v4"]
+MJ_ENV_NAMES = ["Ant-v4", "Walker2d-v4", "HalfCheetah-v4", "Hopper-v4", "CartPole-v0"]
 MJ_ENV_KWARGS = {name: {"render_mode": "rgb_array"} for name in MJ_ENV_NAMES}
 MJ_ENV_KWARGS["Ant-v4"]["use_contact_forces"] = True
 
@@ -91,11 +91,19 @@ def Path(obs, image_obs, acs, rewards, next_obs, terminals):
     }
 
 
-def convert_path_to_obs_actions(paths):
-    obs_action_pairs = np.concatenate(
-        [np.concatenate(path["observation"], path["action"]) for path in paths], axis=1
-    )
-    return obs_action_pairs
+def convert_path_to_obs_actions(paths, discrete=None, ac_dim=None):
+    obs_action_pairs = []
+    for path in paths:
+        if discrete:
+            path_len = get_pathlength(path)
+            acs = np.zeros((path_len, ac_dim))
+            acs[np.arange(path_len), np.squeeze((path["action"]).astype(int))] = 1
+            obs_action_pairs.append(np.concatenate((path["observation"], acs), axis=1))
+        else:
+            obs_action_pairs.append(
+                np.concatenate((path["observation"], path["action"]), axis=1)
+            )
+    return np.concatenate(obs_action_pairs)
 
 
 def convert_listofrollouts(paths, concat_rew=True):
