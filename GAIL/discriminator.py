@@ -3,10 +3,11 @@ import torch
 from torch import nn, optim
 
 import GAIL.pytorch_util as ptu
+from GAIL.pytorch_util import *
 
 
 class Discriminator(nn.Module):
-    def __init__(self, params, expert_pairs, **kwargs):
+    def __init__(self, params, expert_pairs, states_only, **kwargs):
         super().__init__(**kwargs)
         self.ob_dim = params["ob_dim"]
         self.ac_dim = params["ac_dim"]
@@ -14,8 +15,9 @@ class Discriminator(nn.Module):
         self.n_layers = params["n_layers"]
         self.gamma = params["gamma"]
         self.learning_rate = params["learning_rate"]
+        self.net_dim = self.ob_dim if states_only else self.ob_dim + self.ac_dim
         self.net = ptu.build_mlp(
-            input_size=self.ob_dim + self.ac_dim,
+            input_size=self.net_dim,
             output_size=1,
             n_layers=self.n_layers,
             size=self.size,
@@ -26,8 +28,8 @@ class Discriminator(nn.Module):
             self.net.parameters(),
             self.learning_rate,
         )
-        self.loss = nn.BCELoss()
-        self.expert_pairs = ptu.from_numpy(expert_pairs)
+        self.expert_pairs = expert_pairs
+        self.states_only = states_only
         self.net.to(ptu.device)
 
     def forward(self, obs_ac_pairs):
@@ -37,14 +39,16 @@ class Discriminator(nn.Module):
         return pred
 
     def calculate_reward(self, pred, terminals):
+        "Returns the reward and returns"
         reward = -torch.log(pred).squeeze(1)
         reward = torch.cat((reward, torch.tensor([0]).to(ptu.device)))
         ret = torch.zeros_like(reward)
         for i in (np.arange(reward.shape[0] - 1))[::-1]:
             ret[i] = reward[i] + (ret[i + 1] * self.gamma) * (1 - terminals[i])
-        return ret[:-1].detach()
+        return reward[:-1].detach(), ret[:-1].detach()
 
     def update(self, obs_acs, rews, next_ob, terminals):
+        self.loss = nn.BCELoss()
         obs_acs = ptu.from_numpy(obs_acs)
         terminals = ptu.from_numpy(terminals)
         pred_agent = self(obs_acs)
@@ -52,12 +56,13 @@ class Discriminator(nn.Module):
 
         # Update the discriminator parameters
         self.optimizer.zero_grad()
-        loss = self.loss(pred_agent, torch.zeros_like(pred_agent)) + self.loss(
-            pred_expert, torch.ones_like(pred_expert)
+        loss = self.loss(pred_agent, torch.ones_like(pred_agent)) + self.loss(
+            pred_expert, torch.zeros_like(pred_expert)
         )
         loss.backward()
         self.optimizer.step()
 
-        # Return new reward for TRPO
-        advantages = self.calculate_reward(pred_agent, terminals)
-        return ptu.to_numpy(advantages)
+        # Return new reward for TRPO/PPO
+        new_pred_agent = self(obs_acs)
+        rewards, returns = self.calculate_reward(new_pred_agent, terminals)
+        return ptu.to_numpy(rewards), ptu.to_numpy(returns)

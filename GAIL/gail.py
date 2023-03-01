@@ -11,7 +11,6 @@ import GAIL.utils as utils
 from GAIL.agents import GAILAgent
 from GAIL.discriminator import Discriminator
 from GAIL.logger import Logger
-from GAIL.policy import MLPPolicyGAIL
 
 
 class GAIL:
@@ -30,53 +29,89 @@ class GAIL:
         ## ENV
         #############
 
-        # Make the gym environment
+        # Video Logging Setup
         if self.params["video_log_freq"] == -1:
             self.log_video = 0
             self.params["env_kwargs"]["render_mode"] = None
-        print(self.params["env_kwargs"])
-        self.env = gym.make(
-            self.params["env_name"],
-            **self.params["env_kwargs"],
-        )
+
+        # Initialise vectorized gym environment
+        self.num_envs = self.params["multiprocess_gym_envs"]
+        if self.num_envs > 1:
+            dummy_env = gym.make(self.params["env_name"], **self.params["env_kwargs"])
+            env_for_properties = dummy_env
+            self.env = gym.vector.make(
+                self.params["env_name"],
+                num_envs=self.num_envs,
+                **self.params["env_kwargs"],
+            )
+        else:
+            self.env = gym.make(self.params["env_name"], **self.params["env_kwargs"])
+            env_for_properties = self.env
+
         self.env.reset(seed=seed)
 
         # Maximum length for episodes
-        self.params["ep_len"] = self.params["ep_len"] or self.env.spec.max_episode_steps
+        self.params["ep_len"] = (
+            self.params["ep_len"] or env_for_properties.spec.max_episode_steps
+        )
         MAX_VIDEO_LEN = self.params["ep_len"]
 
         # Is this env continuous, or self.discrete?
-        discrete = isinstance(self.env.action_space, gym.spaces.Discrete)
+        discrete = isinstance(env_for_properties.action_space, gym.spaces.Discrete)
         self.discrete = discrete
         self.params["agent_params"]["discrete"] = discrete
 
+        # Is the observation an image?
+        img = len(env_for_properties.observation_space.shape) > 2
+
         # Observation and action sizes
-        ob_dim = self.env.observation_space.shape[0]
-        ac_dim = self.env.action_space.n if discrete else self.env.action_space.shape[0]
+        ob_dim = (
+            env_for_properties.observation_space.shape
+            if img
+            else env_for_properties.observation_space.shape[0]
+        )
+        ac_dim = (
+            env_for_properties.action_space.n
+            if discrete
+            else env_for_properties.action_space.shape[0]
+        )
+
+        # Set obs, ac dimensions
         self.params["agent_params"]["ac_dim"] = ac_dim
         self.params["agent_params"]["ob_dim"] = ob_dim
-        self.params["agent_params"]["gamma"] = self.params["discount"]
 
         # simulation timestep, will be used for video saving
-        if "model" in dir(self.env):
-            self.fps = 1 / self.env.model.opt.timestep
-        else:
-            self.fps = self.env.env.metadata["render_fps"]
+        if "model" in dir(env_for_properties):
+            self.fps = 1 / env_for_properties.model.opt.timestep
+        elif "video.frames_per_second" in env_for_properties.env.metadata.keys():
+            self.fps = env_for_properties.env.metadata["video.frames_per_second"]
 
         self.env.seed(seed)
 
         # Setup GAIL
         agent_params = self.params["agent_params"]
-        self.expert_data = params["expert_data"]
+        self.expert_data = self.params["expert_data"]
         self.agent = GAILAgent(self.env, agent_params)
         with open(self.expert_data, "rb") as f:
             self.expert_paths = pickle.loads(f.read())
-        self.expert_oa_pairs = utils.convert_path_to_obs_actions(
-            self.expert_paths, discrete, ac_dim
-        )
+        obs, _, _, _, _ = utils.convert_listofrollouts(self.expert_paths)
+        if params["states_only"]:
+            self.expert_samples = obs
+        else:
+            self.expert_samples = utils.convert_path_to_obs_actions(
+                self.expert_paths,
+                discrete,
+                ac_dim,
+            )
         self.discriminator = Discriminator(
-            params=agent_params, expert_pairs=self.expert_oa_pairs
+            params=agent_params,
+            expert_pairs=self.expert_samples,
+            states_only=params["states_only"],
         )
+        self.gamma = agent_params["gamma"]
+
+        self.IL_trajectories = {}
+        self.REWARDS = []
 
     def run_training_loop(self, n_iters):
         self.total_envsteps = 0
@@ -100,22 +135,63 @@ class GAIL:
                 self.logmetrics = False
 
             print(f"*** Training Interation {itr} ****")
-            paths, steps_this_batch = utils.sample_trajectories(
-                self.env,
+            paths, steps_this_batch = self.collect_training_trajectories(
                 self.agent.actor,
                 self.params["batch_size"],
                 self.params["ep_len"],
             )
             self.total_envsteps += steps_this_batch
             ob, ac, rew, next_ob, terminal = utils.convert_listofrollouts(paths)
-            ob_ac_pairs = utils.convert_path_to_obs_actions(
-                paths, self.discrete, self.params["agent_params"]["ac_dim"]
+
+            rl_returns = np.zeros(ob.shape[0] + 1)
+            for i in (np.arange(rew.shape[0]))[::-1]:
+                rl_returns[i] = rew[i] + (rl_returns[i + 1] * self.gamma) * (
+                    1 - terminal[i]
+                )
+
+            if self.params["states_only"]:
+                novice_data = ob
+            else:
+                novice_data = utils.convert_path_to_obs_actions(
+                    paths, self.discrete, self.params["agent_params"]["ac_dim"]
+                )
+            rewards, returns = self.discriminator.update(
+                novice_data, rew, next_ob, terminal
             )
-            rewards = self.discriminator.update(ob_ac_pairs, rew, next_ob, terminal)
-            train_log = self.agent.train(ob, ac, rewards, next_ob, terminal)
+            self.REWARDS.append(
+                {
+                    "rl_reward": rew,
+                    "rl_return": rl_returns[:-1],
+                    "disc_reward": rewards,
+                    "disc_returns": returns,
+                }
+            )
+
+            train_log = self.agent.train(ob, ac, rewards, returns, next_ob, terminal)
             training_logs.append(train_log)
 
             self.perform_logging(itr, paths, self.agent.actor, None, training_logs)
+        with open(f"reward_data_{self.params['env_name']}.pkl", "wb") as f:
+            pickle.dump(self.REWARDS, f)
+
+    def collect_training_trajectories(
+        self, collect_policy, batch_size, max_path_length
+    ):
+        print("\nCollecting data to be used for training...")
+        env = self.env
+        max_path_length = self.params["ep_len"]
+        num_envs = self.num_envs
+
+        if num_envs > 1:
+            paths, envsteps_this_batch = utils.sample_trajectories_vectorized(
+                env, collect_policy, batch_size, max_path_length
+            )
+        else:
+            paths, envsteps_this_batch = utils.sample_trajectories(
+                env, collect_policy, batch_size, max_path_length, False
+            )
+
+        return paths, envsteps_this_batch
 
     def perform_logging(self, itr, paths, eval_policy, train_video_paths, all_logs):
         last_log = all_logs[-1]
@@ -123,9 +199,30 @@ class GAIL:
 
         # collect eval trajectories, for logging
         print("\nCollecting data for eval...")
-        eval_paths, eval_envsteps_this_batch = utils.sample_trajectories(
-            self.env, eval_policy, self.params["eval_batch_size"], self.params["ep_len"]
-        )
+        if self.num_envs > 1:
+            eval_paths, _ = utils.sample_trajectories_vectorized(
+                self.env,
+                eval_policy,
+                self.params["eval_batch_size"],
+                self.params["ep_len"],
+            )
+
+            """
+            eval_returns = np.mean(
+                [eval_path["reward"].sum() for eval_path in eval_paths]
+            )
+            with open(
+                f"trajectories_{self.params['env_name']}_{int(eval_returns)}", "wb"
+            ) as f:
+                pickle.dump(eval_paths, f)
+            """
+        else:
+            eval_paths, _ = utils.sample_trajectories(
+                self.env,
+                eval_policy,
+                self.params["eval_batch_size"],
+                self.params["ep_len"],
+            )
 
         # save eval rollouts as videos in tensorboard event file
         if self.logvideo and train_video_paths != None:
@@ -158,6 +255,10 @@ class GAIL:
             # returns, for logging
             train_returns = [path["reward"].sum() for path in paths]
             eval_returns = [eval_path["reward"].sum() for eval_path in eval_paths]
+
+            ##Log the discriminator rewards and true RL rewards
+
+            ###Save Eval Trajectories at every iteration
 
             # episode lengths, for logging
             train_ep_lens = [len(path["reward"]) for path in paths]

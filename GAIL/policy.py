@@ -7,7 +7,14 @@ from torch import distributions, nn, optim
 from torch.nn import functional as F
 
 import GAIL.pytorch_util as ptu
-from GAIL.utils import normalize
+from GAIL.utils import (
+    conjugate_gradient,
+    get_flat_grads,
+    get_flat_params,
+    normalize,
+    rescale_and_linesearch,
+    set_params,
+)
 
 
 class BasePolicy(object, metaclass=abc.ABCMeta):
@@ -33,7 +40,11 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         learning_rate=1e-4,
         training=True,
         nn_baseline=True,
-        **kwargs
+        entropy_coeff=0,
+        clip_eps=0.2,
+        max_grad_norm=100,
+        gamma=0.99,
+        **kwargs,
     ):
         super().__init__(**kwargs)
 
@@ -47,6 +58,16 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
         self.training = training
         self.nn_baseline = nn_baseline
 
+        # PPO properties
+        self.entropy_coeff = entropy_coeff
+        self.clip_eps = clip_eps
+        self.max_grad_norm = max_grad_norm
+
+        # TRPO properties
+        self.max_kl = 0.001
+        self.cg_damping = 1
+        self.gamma = 0.99
+
         if self.discrete:
             self.logits_na = ptu.build_mlp(
                 input_size=self.ob_dim,
@@ -58,6 +79,7 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
             self.mean_net = None
             self.logstd = None
             self.optimizer = optim.Adam(self.logits_na.parameters(), self.learning_rate)
+            self.parameters = self.logits_na.parameters()
         else:
             self.logits_na = None
             self.mean_net = ptu.build_mlp(
@@ -75,6 +97,7 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
                 itertools.chain([self.logstd], self.mean_net.parameters()),
                 self.learning_rate,
             )
+            self.parameters = itertools.chain([self.logstd], self.mean_net.parameters())
 
         if nn_baseline:
             self.baseline = ptu.build_mlp(
@@ -105,9 +128,6 @@ class MLPPolicy(BasePolicy, nn.Module, metaclass=abc.ABCMeta):
             obs = ptu.from_numpy(obs.astype(np.float32))
         with torch.no_grad():
             action = ptu.to_numpy(self.forward(obs).sample())
-
-        if self.discrete:
-            action = np.array([action])
         return action
 
     # update/train this policy
@@ -145,6 +165,54 @@ class MLPPolicyGAIL(MLPPolicy):
         super().__init__(ac_dim, ob_dim, n_layers, size, **kwargs)
         self.baseline_loss = nn.MSELoss()
 
+    def ppo_update(self, observations, actions, advantages, q_values=None):
+        n_obs = observations.shape[0]
+
+        observations = ptu.from_numpy(observations)
+        actions = ptu.from_numpy(actions)
+        advantages = ptu.from_numpy(advantages)
+        q_values = ptu.from_numpy(q_values)
+        q_values = normalize(q_values, (q_values).mean(), (q_values).std())
+
+        logprobs_old = (
+            self.forward(observations).log_prob(actions).reshape(advantages.shape)
+        )
+
+        for i in range(15):
+            distribution = self.forward(observations)
+            entropy = distribution.entropy().mean()
+            logprobs = distribution.log_prob(actions).reshape(advantages.shape)
+            ratios = (logprobs - logprobs_old.detach()).exp_()
+            loss_actor1 = torch.mul(ratios, advantages)
+            loss_actor2 = (
+                torch.clamp(ratios, 1.0 - self.clip_eps, 1.0 + self.clip_eps)
+                * advantages
+            )
+            loss_actor = -torch.min(loss_actor1, loss_actor2).mean()
+
+            self.optimizer.zero_grad()
+            (loss_actor - self.entropy_coeff * entropy).backward(retain_graph=False)
+            nn.utils.clip_grad_norm_(self.parameters, 40)
+            # nn.utils.clip_grad_norm_(self.parameters, self.max_grad_norm)
+            self.optimizer.step()
+
+            if self.nn_baseline:
+                self.baseline_optimizer.zero_grad()
+                loss_b = self.baseline_loss(
+                    self.baseline(observations).reshape(q_values.shape),
+                    q_values,
+                )
+                loss_b.backward(retain_graph=False)
+                # nn.utils.clip_grad_norm_(self.parameters, 40)
+                self.baseline_optimizer.step()
+
+            train_log = {
+                "Training Loss": ptu.to_numpy(
+                    ((loss_actor - self.entropy_coeff * entropy))
+                ),
+            }
+        return train_log
+
     def update(self, observations, actions, advantages, q_values=None):
         observations = ptu.from_numpy(observations)
         actions = ptu.from_numpy(actions)
@@ -156,6 +224,7 @@ class MLPPolicyGAIL(MLPPolicy):
         # sum_{t=0}^{T-1} [grad [log pi(a_t|s_t) * (Q_t - b_t)]]
         # HINT2: you will want to use the `log_prob` method on the distribution returned
         # by the `forward` method
+
         logprobs = (
             self.forward(observations).log_prob(actions).reshape(advantages.shape)
         )
@@ -187,11 +256,12 @@ class MLPPolicyGAIL(MLPPolicy):
             loss_b = self.baseline_loss(
                 self.baseline(observations).reshape(q_values.shape), q_values
             )
-            loss_b.backward()
+            loss_b.backward(retain_graph=False)
+            # nn.utils.clip_grad_norm_(self.baseline.parameters(), self.max_grad_norm)
             self.baseline_optimizer.step()
 
         train_log = {
-            "Training Loss": ptu.to_numpy(loss),
+            "Training Loss": ptu.to_numpy(((loss))),
         }
         return train_log
 

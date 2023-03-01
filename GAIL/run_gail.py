@@ -35,8 +35,6 @@ class GAIL_Trainer(object):
         self.params["env_kwargs"] = MJ_ENV_KWARGS[self.params["env_name"]]
         self.params["agent_class"] = GAILAgent
         self.params["agent_params"] = agent_params
-        self.params["batch_size_initial"] = self.params["batch_size"]
-
         ################
         ## RL TRAINER
         ################
@@ -53,40 +51,48 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser()
+
+    # Expert data parameters
     parser.add_argument(
         "--expert_policy_file", "-epf", type=str, required=False
     )  # relative to where you're running this script from
+    parser.add_argument("--num_expert_trajectories", "-net", type=int, default=4)
     parser.add_argument(
         "--expert_data",
         "-ed",
         type=str,
         default="gail_demo/expert/expert_data_HalfCheetah-v4.pkl",
     )  # relative to where you're running this script from
+
+    # Environment and Experiment
     parser.add_argument("--env_name", type=str)
     parser.add_argument("--exp_name", type=str, default="todo")
-    parser.add_argument("--n_iter", "-n", type=int, default=300)
 
+    # Training parameters
+    parser.add_argument("--n_iter", "-n", type=int, default=300)
     parser.add_argument("--reward_to_go", "-rtg", action="store_true", default=True)
     parser.add_argument("--nn_baseline", action="store_true", default=True)
-    parser.add_argument("--gae_lambda", type=float)
+    parser.add_argument("--gae_lambda", type=float, default=0.97)
     parser.add_argument(
-        "--dont_standardize_advantages", "-dsa", action="store_true", default=True
+        "--dont_standardize_advantages", "-dsa", action="store_true", default=False
     )
+    parser.add_argument("--states_only", action="store_true", default=False)
     parser.add_argument(
         "--batch_size", "-b", type=int, default=5000
     )  # steps collected per train iteration
     parser.add_argument(
-        "--eval_batch_size", "-eb", type=int, default=400
+        "--eval_batch_size", "-eb", type=int, default=5000
     )  # steps collected per eval iteration
     parser.add_argument(
         "--train_batch_size", "-tb", type=int, default=1000
     )  ##steps used per gradient step
 
-    parser.add_argument("--discount", type=float, default=0.99)
+    # Learning Parameters
+    parser.add_argument("--discount", type=float, default=0.995)
     parser.add_argument("--learning_rate", "-lr", type=float, default=5e-3)
     parser.add_argument("--n_layers", "-l", type=int, default=2)
     parser.add_argument("--size", "-s", type=int, default=100)
-
+    parser.add_argument("--multiprocess_gym_envs", type=int, default=1)
     parser.add_argument(
         "--ep_len", type=int
     )  # students shouldn't change this away from env's default
@@ -98,6 +104,7 @@ def main():
 
     parser.add_argument("--save_params", action="store_true")
     parser.add_argument("--action_noise_std", type=float, default=0)
+
     args = parser.parse_args()
 
     # convert args to dictionary
